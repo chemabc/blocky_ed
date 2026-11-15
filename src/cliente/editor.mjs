@@ -7,7 +7,9 @@
 //     al momento, con su cursor y su nombre;
 //   - a la derecha, si se enciende, el resultado compilado con Typst, que se pone al día poco después de
 //     cada cambio. Apagado, no se ve ni se pide nada al servidor;
-//   - los comentarios, como trozos de texto resaltados; al pulsar uno, sale su bocadillo con las respuestas.
+//   - los comentarios, como trozos de texto resaltados; al pulsar uno, sale su bocadillo con las respuestas;
+//   - si la aplicación usa la biblioteca (opción «biblioteca»), los desplegables «Plantilla» y «Cabecera y
+//     pie» y el cajón de fragmentos e imágenes (ver biblioteca.mjs).
 //
 // Sin colores de Markdown a propósito: pesan el doble y el resultado ya se ve en la vista Typst.
 
@@ -17,6 +19,8 @@ import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/pro
 import { EditorView, minimalSetup } from "codemirror";
 import { yCollab } from "y-codemirror.next";
 import * as Y from "yjs";
+
+import { ESTILOS_DE_BIBLIOTECA, arbol, camino, clienteDeBiblioteca, montarBiblioteca, referenciaDeImagen } from "./biblioteca.mjs";
 
 // Milisegundos que espera la vista Typst desde el último cambio antes de pedir la compilación.
 const ESPERA_DE_LA_VISTA = 1200;
@@ -84,7 +88,8 @@ const ESTILOS = `
 .ec-burbuja .ec-principal{background:var(--ec-acento);color:#fff;border-color:var(--ec-acento)}
 .ec-quien{font-weight:600}
 .ec-cuando{opacity:.6;font-size:.85em}
-`;
+.ec-barra select{font:inherit;color:inherit;background:var(--ec-fondo);border:1px solid var(--ec-borde);border-radius:.3rem;padding:.1rem .2rem;max-width:12rem}
+${ESTILOS_DE_BIBLIOTECA}`;
 
 // Pone los estilos en la página una sola vez.
 function ponerEstilos() {
@@ -130,6 +135,8 @@ function aplicarFormato(vista, [tipo, a, b, ejemplo]) {
 //   - alias, color: cómo se ve a esta persona (cursores y comentarios).
 //   - permiso: «leer», «comentar» o «escribir».
 //   - formato: «markdown» (de partida) o «typst»: qué botones salen.
+//   - biblioteca: true si el pase trae usuario y ámbitos (salen la plantilla, la cabecera y pie, los
+//     fragmentos y las imágenes).
 //   - alCambiar(texto), alPersonas(lista), alEstado(estado): avisos para la aplicación (opcionales).
 function montar(elemento, opciones) {
   const { url, sala, alias, color = "#7c3aed", formato = "markdown", alCambiar, alPersonas, alEstado } = opciones;
@@ -302,6 +309,108 @@ function montar(elemento, opciones) {
   botonPdf.type = "button";
   botonPdf.title = "Descarga el PDF";
   barra.append(botonVista, botonPrevia, botonPdf);
+
+  // ── Biblioteca: plantilla, cabecera y pie, fragmentos e imágenes ──
+  // Lo elegido se guarda en la sala (mapa «opciones»): lo ven todas las personas y lo cambia quien escribe.
+  const elegidos = proveedor.document.getMap("opciones");
+  const api = opciones.biblioteca ? clienteDeBiblioteca(http, paseFresco) : null;
+  let biblioteca = null; // lo leído de la biblioteca (GET /biblioteca)
+  const desplegables = {};
+  const cajon = crear("div", "ec-cajon");
+  cajon.hidden = true;
+  cajon.setAttribute("aria-label", "Fragmentos e imágenes");
+  const botonCajon = crear("button", "", "📚 Fragmentos e imágenes");
+  botonCajon.type = "button";
+  botonCajon.title = "Mete en el texto trozos de la enciclopedia de fragmentos o imágenes";
+  botonCajon.setAttribute("aria-pressed", "false");
+  if (api) {
+    barra.insertBefore(crear("span", "ec-separa"), botonComentar);
+    for (const [clase, etiqueta, sinNada] of [["plantilla", "Plantilla", "Sin plantilla"], ["membrete", "Cabecera y pie", "Sin cabecera ni pie"]]) {
+      const lista = crear("select");
+      lista.title = etiqueta;
+      lista.setAttribute("aria-label", etiqueta);
+      lista.dataset.sinNada = sinNada;
+      lista.addEventListener("change", () => elegir(clase, lista.value));
+      desplegables[clase] = lista;
+      barra.insertBefore(lista, botonComentar);
+    }
+    barra.insertBefore(botonCajon, botonComentar);
+    raiz.insertBefore(cajon, cuerpo);
+  }
+
+  // Pinta los dos desplegables con lo que la persona ve, agrupado por carpetas, y lo elegido en la sala.
+  function pintarDesplegables() {
+    for (const [clase, lista] of Object.entries(desplegables)) {
+      const actual = elegidos.get(clase) || "";
+      lista.replaceChildren(new Option(lista.dataset.sinNada, ""));
+      const grupos = new Map();
+      for (const elemento of biblioteca?.elementos.filter((e) => e.clase === clase) || []) {
+        const sitio = camino(biblioteca.carpetas, elemento.carpeta);
+        if (!grupos.has(sitio)) grupos.set(sitio, crear("optgroup"));
+        grupos.get(sitio).label = sitio;
+        grupos.get(sitio).append(new Option(elemento.nombre, elemento.id));
+      }
+      lista.append(...grupos.values());
+      if (actual && !lista.querySelector(`option[value="${actual}"]`)) lista.append(new Option("(una que no puedes ver)", actual));
+      lista.value = actual;
+    }
+  }
+
+  // Elige una plantilla o una cabecera y pie para el texto. Si es una plantilla con texto de partida y el
+  // texto está vacío (y en el mismo formato), lo pone.
+  function elegir(clase, id) {
+    if (permiso !== "escribir") return pintarDesplegables();
+    proveedor.document.transact(() => {
+      if (id) elegidos.set(clase, id);
+      else elegidos.delete(clase);
+      const plantilla = clase === "plantilla" && biblioteca?.elementos.find((e) => e.id === id);
+      if (plantilla?.datos.texto && !texto.length && (plantilla.datos.formato || "markdown") === formato) texto.insert(0, plantilla.datos.texto);
+    });
+  }
+
+  // Mete un trozo de texto donde está el cursor (o en lugar de lo seleccionado).
+  function meter(trozo) {
+    if (permiso !== "escribir") return;
+    const { from, to } = vista.state.selection.main;
+    vista.dispatch({ changes: { from, to, insert: trozo }, selection: { anchor: from + trozo.length } });
+    vista.focus();
+  }
+
+  // Pinta el cajón: el árbol de fragmentos y el de imágenes; al pulsar uno, se mete en el texto.
+  function pintarCajon() {
+    const columna = (titulo, contenido) => {
+      const caja = crear("div");
+      caja.append(crear("strong", "", titulo), contenido);
+      return caja;
+    };
+    cajon.replaceChildren(
+      columna("Fragmentos", arbol(biblioteca, "fragmento", { alElegir: (e) => meter(e.datos.texto) })),
+      columna("Imágenes", arbol(biblioteca, "imagen", { alElegir: (e) => meter(referenciaDeImagen(e, formato)), miniatura: (e) => `${http}/biblioteca/imagenes/${e.id}?pase=${encodeURIComponent(pase)}` })),
+    );
+  }
+
+  // Lee la biblioteca y pinta los desplegables (y el cajón, si está abierto). Si falla, lo dice en el cajón.
+  async function cargarBiblioteca() {
+    try {
+      biblioteca = await api("GET", "");
+    } catch (error) {
+      biblioteca = null;
+      cajon.replaceChildren(crear("p", "ec-mensaje error", `La biblioteca no responde: ${error.message}`));
+    }
+    pintarDesplegables();
+    if (biblioteca && !cajon.hidden) pintarCajon();
+  }
+  botonCajon.addEventListener("click", () => {
+    cajon.hidden = !cajon.hidden;
+    botonCajon.setAttribute("aria-pressed", String(!cajon.hidden));
+    if (!cajon.hidden) cargarBiblioteca();
+  });
+  // Si alguien cambia la plantilla o la cabecera y pie: desplegables al día y la vista Typst se recompila.
+  elegidos.observe(() => {
+    pintarDesplegables();
+    vistaTypst.cambio();
+  });
+  if (api) cargarBiblioteca();
 
   // La vista Typst: encendida, compila poco después de cada cambio; apagada, nada.
   const vistaTypst = {
@@ -484,6 +593,7 @@ function montar(elemento, opciones) {
   // ── Permiso: botones y solo lectura ──
   function aplicarPermiso() {
     for (const boton of botonesDeFormato) boton.disabled = permiso !== "escribir";
+    for (const lista of Object.values(desplegables)) lista.disabled = permiso !== "escribir";
     vista.dispatch({ effects: soloLectura.reconfigure(EditorState.readOnly.of(permiso !== "escribir")) });
   }
   aplicarPermiso();
@@ -521,4 +631,4 @@ function montar(elemento, opciones) {
   };
 }
 
-window.EditorColaborativo = { montar };
+window.EditorColaborativo = { montar, montarBiblioteca };

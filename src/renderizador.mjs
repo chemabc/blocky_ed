@@ -22,10 +22,15 @@ const RECORDADOS = 50;
 // ── Dentro del hilo: compilar ────────────────────────────────────────────────────────────────────────
 if (!isMainThread) {
   const { NodeCompiler } = await import("@myriaddreamin/typst-ts-node-compiler");
-  const compilador = NodeCompiler.create({ workspace: mkdtempSync(join(tmpdir(), "typst-")) });
-  // Cada mensaje: { id, fuente, como } → responde { id, datos } o { id, error }.
-  parentPort.on("message", ({ id, fuente, como }) => {
+  const carpeta = mkdtempSync(join(tmpdir(), "typst-"));
+  const compilador = NodeCompiler.create({ workspace: carpeta });
+  // Cada mensaje: { id, fuente, como, ficheros } → responde { id, datos } o { id, error }. Los ficheros
+  // (las imágenes de la biblioteca: { "/imagenes/<número>": bytes }) se le dan al compilador en memoria,
+  // como si estuvieran en su carpeta vacía; los de la compilación anterior se olvidan.
+  parentPort.on("message", ({ id, fuente, como, ficheros = {} }) => {
     try {
+      compilador.resetShadow();
+      for (const [ruta, bytes] of Object.entries(ficheros)) compilador.mapShadow(join(carpeta, ruta), Buffer.from(bytes));
       const resultado = compilador.compile({ mainFileContent: fuente });
       if (resultado.hasError()) {
         const avisos = resultado.takeDiagnostics()?.shortDiagnostics || [];
@@ -58,7 +63,7 @@ function elHilo() {
 }
 
 // Manda una compilación al hilo y espera su respuesta, como mucho TIEMPO_MAXIMO segundos.
-function compilarEnElHilo(fuente, como) {
+function compilarEnElHilo(fuente, como, ficheros) {
   return new Promise((bien, mal) => {
     const id = siguiente++;
     const trabajador = elHilo();
@@ -76,7 +81,7 @@ function compilarEnElHilo(fuente, como) {
       else bien(respuesta.datos);
     }
     trabajador.on("message", alResponder);
-    trabajador.postMessage({ id, fuente, como });
+    trabajador.postMessage({ id, fuente, como, ficheros });
   });
 }
 
@@ -84,10 +89,13 @@ function compilarEnElHilo(fuente, como) {
 // se compiló hace poco, devuelve lo recordado sin compilar.
 //   - fuente: el Typst entero (con su plantilla; ver typst.mjs, componer).
 //   - como: «svg» (para verlo en la página) o «pdf» (para descargarlo).
-export function renderizar(fuente, como = "svg") {
-  const clave = createHash("sha256").update(`${como}\n${fuente}`).digest("hex");
+//   - ficheros: las imágenes que usa, { "/imagenes/<número>": bytes } (ver servidor.mjs).
+export function renderizar(fuente, como = "svg", ficheros = {}) {
+  const resumen = createHash("sha256").update(`${como}\n${fuente}`);
+  for (const [ruta, bytes] of Object.entries(ficheros).sort()) resumen.update(`\n${ruta}\n`).update(bytes);
+  const clave = resumen.digest("hex");
   if (recordados.has(clave)) return Promise.resolve(recordados.get(clave));
-  const trabajo = cola.then(() => compilarEnElHilo(fuente, como));
+  const trabajo = cola.then(() => compilarEnElHilo(fuente, como, ficheros));
   cola = trabajo.catch(() => {});
   return trabajo.then((datos) => {
     recordados.set(clave, datos);

@@ -2,7 +2,9 @@
 //
 // Cada aplicación se da de alta con un nombre, un secreto (para los pases y las firmas) y la dirección
 // en la que el editor la llama. Se leen de la variable de entorno EDITOR_APLICACIONES, en JSON:
-//   {"asambleas": {"secreto": "…", "url": "http://app:8000/editor"}}
+//   {"asambleas": {"secreto": "…", "url": "http://app:8000/editor", "carpetas": ["Actas"]}}
+// «carpetas» (opcional) son los nombres de las carpetas de primer nivel de la biblioteca que ve esa
+// aplicación (ver biblioteca.mjs); sin ella, todas las suyas.
 //
 // Cada aplicación responde a estas llamadas del editor (todas firmadas; ver pases.mjs):
 //   - GET  <url>/texto/?sala=<sala>  →  {"texto": "…", "version": 3}
@@ -24,6 +26,7 @@ export function leerAplicaciones(texto = process.env.EDITOR_APLICACIONES || "{}"
   const aplicaciones = JSON.parse(texto);
   for (const [nombre, datos] of Object.entries(aplicaciones)) {
     if (!datos.secreto || !datos.url) throw new Error(`A la aplicación «${nombre}» le falta el secreto o la dirección.`);
+    if (datos.carpetas !== undefined && !Array.isArray(datos.carpetas)) throw new Error(`Las «carpetas» de «${nombre}» tienen que ser una lista de nombres.`);
   }
   return aplicaciones;
 }

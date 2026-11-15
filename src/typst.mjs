@@ -61,10 +61,13 @@ function enLinea(piezas) {
       case "hardbreak":
         salida += " \\\n";
         break;
-      case "image":
-        // Las imágenes de otras webs no se descargan: se pone su texto alternativo.
-        salida += `[${escapar(pieza.content || "imagen")}]`;
+      case "image": {
+        // Las de la biblioteca («imagen:<número>») se ponen; las de otras webs no se descargan: se pone su
+        // texto alternativo.
+        const de = /^imagen:([0-9a-f]{16})$/.exec(pieza.attrGet("src") || "");
+        salida += de ? `#box(image(${cadena(`/imagenes/${de[1]}`)}, alt: ${cadena(pieza.content || "imagen")}))` : `[${escapar(pieza.content || "imagen")}]`;
         break;
+      }
       default:
         salida += escapar(pieza.content || "");
     }
@@ -158,24 +161,38 @@ export function markdownATypst(texto) {
   return salida.replace(/\n{3,}/g, "\n\n").trim() + "\n";
 }
 
-// Pone la plantilla común (A4, márgenes, letra, número de página y, si lo hay, el título) delante del
-// texto ya en Typst.
-//   - titulo: el título del documento (va en los metadatos del PDF y arriba de la primera página).
-export function plantilla(cuerpo, titulo = "") {
+// Pone delante del texto ya en Typst la plantilla común (A4, márgenes, letra, número de página) y, si el
+// documento los ha elegido, el aspecto de su plantilla y su cabecera y pie (ver biblioteca.mjs).
+//   - titulo: el título del documento. Va en los metadatos del PDF y en la variable «titulo», que las
+//     plantillas pueden usar. Sin plantilla, se pone arriba de la primera página.
+//   - aspecto: el Typst de la plantilla elegida (reglas «#set», «#show»…), o "".
+//   - membrete: { cabecera, pie } en Typst, o null. El pie vacío deja el número de página.
+export function plantilla(cuerpo, titulo = "", { aspecto = "", membrete = null } = {}) {
   const cabecera = [
+    `#let titulo = ${cadena(titulo || "")}`,
     `#set document(title: ${cadena(titulo || "Documento")})`,
     '#set page(paper: "a4", margin: 2cm, numbering: "1 / 1")',
     '#set text(lang: "es", size: 11pt)',
     "#set par(justify: true)",
-    titulo ? `#align(center, text(size: 17pt, weight: "bold", ${cadena(titulo)}))` : "",
+    membrete?.cabecera?.trim() ? `#set page(header: [${membrete.cabecera}])` : "",
+    membrete?.pie?.trim() ? `#set page(footer: [${membrete.pie}])` : "",
+    aspecto.trim(),
+    titulo && !aspecto.trim() ? `#align(center, text(size: 17pt, weight: "bold", ${cadena(titulo)}))` : "",
   ];
   return `${cabecera.filter(Boolean).join("\n")}\n\n${cuerpo}`;
 }
 
 // Prepara el texto de una sala para compilarlo: Markdown se convierte; Typst va tal cual. Lanza un error
-// si el Typst intenta usar paquetes de fuera (se descargarían de internet).
+// si algo (el texto, la plantilla o el membrete) intenta usar paquetes de fuera (se descargarían de internet).
 //   - formato: «markdown» o «typst».
-export function componer(texto, formato = "markdown", titulo = "") {
-  if (formato === "typst" && /@(preview|local)\//.test(texto)) throw new Error("No se pueden usar paquetes de Typst («@preview/…»).");
-  return plantilla(formato === "typst" ? texto : markdownATypst(texto), titulo);
+//   - extras: { aspecto, membrete } (ver plantilla()).
+export function componer(texto, formato = "markdown", titulo = "", extras = {}) {
+  const fuente = plantilla(formato === "typst" ? texto : markdownATypst(texto), titulo, extras);
+  if (/@(preview|local)\//.test(fuente)) throw new Error("No se pueden usar paquetes de Typst («@preview/…»).");
+  return fuente;
+}
+
+// Los números de las imágenes de la biblioteca que usa un Typst ya compuesto («/imagenes/<número>»).
+export function imagenesUsadas(fuente) {
+  return [...new Set([...fuente.matchAll(/\/imagenes\/([0-9a-f]{16})/g)].map((encontrado) => encontrado[1]))];
 }

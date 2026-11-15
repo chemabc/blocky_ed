@@ -12,6 +12,12 @@
 //                                  ejemplo al aprobar un acta o al quitarle a alguien el permiso).
 //   - POST /render (pase=…)      → el texto de la sala compilado con Typst, en SVG, para verlo al lado.
 //   - GET  /pdf?pase=…           → el mismo, en PDF, para descargarlo.
+//   - /biblioteca…               → plantillas, fragmentos, cabeceras y pies, e imágenes (ver más abajo y
+//                                  biblioteca.mjs). Con el pase en la cabecera «Authorization: Bearer …».
+//
+// Cada documento elige su plantilla y su cabecera y pie en un mapa de Yjs, «opciones», dentro de la propia
+// sala ({ plantilla, membrete }: sus números en la biblioteca). Así todas las personas ven lo mismo y solo
+// cambia quien puede escribir. Al compilar, se usan si quien compila los ve.
 //
 // Cada sala tiene al lado otra para sus comentarios («<sala>#comentarios»): quien puede comentar escribe en
 // ella aunque no pueda cambiar el texto. Y cada pase puede traer cuántas personas pueden escribir y
@@ -21,6 +27,7 @@
 //   - EDITOR_PUERTO: el puerto (de partida, 1234).
 //   - EDITOR_APLICACIONES: las aplicaciones que lo usan, en JSON (ver aplicaciones.mjs).
 //   - EDITOR_DATOS: carpeta donde guarda su copia de cada sala (de partida, ./datos).
+//   - EDITOR_CLAVE: clave para cifrar la biblioteca (32 bytes en base64). Sin ella, no hay biblioteca.
 
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -31,9 +38,11 @@ import * as Y from "yjs";
 
 import { guardar, leer } from "./almacen.mjs";
 import { avisarComentarios, avisarGuardado, leerAplicaciones, pedirTexto } from "./aplicaciones.mjs";
+import { ErrorDeBiblioteca, MAXIMO_DE_IMAGEN, crearBiblioteca, quienEs } from "./biblioteca.mjs";
+import { leerClave } from "./cifrado.mjs";
 import { firmaValida, leerPase, nombreDeSala } from "./pases.mjs";
 import { pararRenderizador, renderizar } from "./renderizador.mjs";
-import { componer } from "./typst.mjs";
+import { componer, imagenesUsadas } from "./typst.mjs";
 
 // Carpeta del editor (la de package.json).
 const RAIZ = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -41,6 +50,15 @@ const RAIZ = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const CAMPO = "texto";
 // Lo que se añade al nombre de una sala para la de sus comentarios.
 export const COMENTARIOS = "#comentarios";
+// Nombre del mapa de Yjs con las opciones de cada documento (plantilla y membrete elegidos).
+export const OPCIONES = "opciones";
+// Cabeceras para que otra web (la de cada aplicación) pueda llamar a /render, /pdf y /biblioteca: lo que
+// protege es el pase, no el origen.
+const ABIERTO = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE",
+};
 
 // Separa el nombre interno de una sala en su aplicación, su sala y si es la de comentarios
 // («asambleas/documentos.documento:12#comentarios»).
@@ -56,11 +74,28 @@ function paseDelCuerpo(cuerpo) {
   return new URLSearchParams(cuerpo).get("pase");
 }
 
-// Lee entero el cuerpo de una petición HTTP, como texto.
+// Lee entero el cuerpo de una petición HTTP, en bytes. Si pasa de «maximo» bytes, da error (413).
+async function bytesDe(peticion, maximo) {
+  const trozos = [];
+  let tamano = 0;
+  for await (const trozo of peticion) {
+    tamano += trozo.length;
+    if (tamano > maximo) throw new ErrorDeBiblioteca("Lo enviado es demasiado grande.", 413);
+    trozos.push(trozo);
+  }
+  return Buffer.concat(trozos);
+}
+
+// Lee entero el cuerpo de una petición HTTP, como texto (como mucho 1 MB).
 async function cuerpoDe(peticion) {
-  let texto = "";
-  for await (const trozo of peticion) texto += trozo;
-  return texto;
+  return (await bytesDe(peticion, 1024 * 1024)).toString("utf8");
+}
+
+// El pase de una petición a la biblioteca: en la cabecera «Authorization: Bearer …» o, para ver una
+// imagen desde una etiqueta <img>, en la dirección (?pase=…).
+function paseDe(peticion, direccion) {
+  const cabecera = String(peticion.headers.authorization || "");
+  return cabecera.startsWith("Bearer ") ? cabecera.slice(7) : direccion.searchParams.get("pase");
 }
 
 // Responde a una petición HTTP y corta la cadena de Hocuspocus (que, si no, respondería «OK»).
@@ -75,7 +110,9 @@ function responder(respuesta, estado, contenido, tipo = "text/plain; charset=utf
 //   - carpeta: dónde guarda su copia de cada sala.
 //   - espera, esperaMaxima: milisegundos que espera, tras el último cambio, para avisar a la aplicación
 //     (y como mucho, aunque no se deje de escribir).
-export function crearServidor({ aplicaciones, carpeta, espera = 2000, esperaMaxima = 10000 }) {
+//   - clave: la de cifrar la biblioteca (ver cifrado.mjs). Sin ella, no hay biblioteca.
+export function crearServidor({ aplicaciones, carpeta, clave = null, espera = 2000, esperaMaxima = 10000 }) {
+  const biblioteca = clave ? crearBiblioteca({ carpeta, clave }) : null;
   // Quién ha escrito en cada sala desde el último aviso a la aplicación: nombre de sala → Set de alias.
   const autores = new Map();
   // Versión de la aplicación con la que va cada sala: nombre de sala → número.
@@ -107,21 +144,91 @@ export function crearServidor({ aplicaciones, carpeta, espera = 2000, esperaMaxi
     return [...(presentes.get(nombre)?.values() || [])].filter((otro) => otro === permiso).length;
   }
 
-  // El texto actual de una sala: el que está en memoria, o su copia guardada si nadie la tiene abierta.
-  async function textoDe(nombre) {
+  // El documento de Yjs de una sala: el que está en memoria, o su copia guardada si nadie la tiene abierta
+  // (vacío si no hay ninguna de las dos).
+  async function documentoDe(nombre) {
     const abierta = servidor.documents.get(nombre);
-    if (abierta) return abierta.getText(CAMPO).toString();
-    const copia = await leer(carpeta, nombre);
-    if (!copia) return "";
+    if (abierta) return abierta;
     const documento = new Y.Doc();
-    Y.applyUpdate(documento, copia.estado);
-    return documento.getText(CAMPO).toString();
+    const copia = await leer(carpeta, nombre);
+    if (copia) Y.applyUpdate(documento, copia.estado);
+    return documento;
   }
 
-  // Compila el texto de la sala de un pase con Typst, con su formato y su título.
+  // Compila un texto con Typst para una persona: le pone la plantilla y el membrete elegidos (si los ve) y le
+  // da al compilador las imágenes de la biblioteca que usa (las que ve; las demás quedan como «no
+  // encontradas»).
+  //   - datos: lo leído del pase (app, usuario, ámbitos…).
+  //   - texto, formato, titulo: lo que se compila.
+  //   - eleccion: { plantilla, membrete } (números en la biblioteca), o directamente { aspecto, membrete }
+  //     (para previsualizar una plantilla mientras se escribe).
+  //   - como: «svg» o «pdf».
+  async function compilarPara(datos, { texto, formato, titulo, eleccion = {} }, como) {
+    const quien = biblioteca ? quienEs(datos, aplicaciones[datos.app]) : null;
+    const extras = { aspecto: eleccion.aspecto || "", membrete: eleccion.cabeceraYPie || null };
+    if (quien && eleccion.plantilla) extras.aspecto = (await biblioteca.elementoVisible(quien, eleccion.plantilla, "plantilla"))?.datos.aspecto || "";
+    if (quien && eleccion.membrete) extras.membrete = (await biblioteca.elementoVisible(quien, eleccion.membrete, "membrete"))?.datos || null;
+    const fuente = componer(texto, formato || "markdown", titulo || "", extras);
+    const ficheros = {};
+    for (const id of quien ? imagenesUsadas(fuente) : []) {
+      const encontrada = await biblioteca.imagen(quien, id);
+      if (encontrada) ficheros[`/imagenes/${id}`] = encontrada.bytes;
+    }
+    return renderizar(fuente, como, ficheros);
+  }
+
+  // Compila el texto de la sala de un pase con Typst, con su formato, su título y lo que haya elegido.
   async function compilarSala(datos, como) {
-    const texto = await textoDe(nombreDeSala(datos.app, datos.sala));
-    return renderizar(componer(texto, datos.formato || "markdown", datos.titulo || ""), como);
+    const documento = await documentoDe(nombreDeSala(datos.app, datos.sala));
+    const eleccion = documento.getMap(OPCIONES).toJSON();
+    return compilarPara(datos, { texto: documento.getText(CAMPO).toString(), formato: datos.formato, titulo: datos.titulo, eleccion }, como);
+  }
+
+  // Atiende las direcciones de la biblioteca (ver arriba y biblioteca.mjs). Devuelve [estado, contenido,
+  // tipo]. Los errores de la biblioteca se cuentan a la persona con su código.
+  async function atenderBiblioteca(peticion, direccion) {
+    if (!biblioteca) return [503, "Este editor no tiene biblioteca (falta EDITOR_CLAVE)."];
+    let quien;
+    try {
+      const datos = leerPase(paseDe(peticion, direccion), aplicaciones);
+      quien = quienEs(datos, aplicaciones[datos.app]);
+      if (!quien) return [403, "El pase no trae usuario: la aplicación no usa la biblioteca."];
+    } catch (error) {
+      return [403, error.message];
+    }
+    const json = (valor) => [200, JSON.stringify(valor ?? { hecho: true }), "application/json; charset=utf-8"];
+    const [, , que, id] = direccion.pathname.split("/");
+    const metodo = peticion.method;
+    try {
+      if (metodo === "GET" && !que) return json(await biblioteca.ver(quien));
+      if (metodo === "GET" && que === "imagenes" && id) {
+        const encontrada = await biblioteca.imagen(quien, id);
+        return encontrada ? [200, encontrada.bytes, encontrada.tipo] : [404, "No existe o no la ves."];
+      }
+      if (metodo === "POST" && que === "imagenes") {
+        const bytes = await bytesDe(peticion, MAXIMO_DE_IMAGEN + 1);
+        const p = direccion.searchParams;
+        return json(await biblioteca.subirImagen(quien, { carpeta: p.get("carpeta"), nombre: p.get("nombre"), dueno: p.get("dueno") || undefined, compartido: JSON.parse(p.get("compartido") || "[]"), bytes }));
+      }
+      if (metodo === "POST" && que === "previa") {
+        const { texto, formato, aspecto, cabecera, pie } = JSON.parse(await cuerpoDe(peticion));
+        const datos = leerPase(paseDe(peticion, direccion), aplicaciones);
+        const svg = await compilarPara(datos, { texto: texto || "", formato, titulo: "Título de ejemplo", eleccion: { aspecto, cabeceraYPie: { cabecera, pie } } }, "svg");
+        return [200, svg, "image/svg+xml; charset=utf-8"];
+      }
+      const cuerpo = ["POST", "PUT"].includes(metodo) ? JSON.parse((await cuerpoDe(peticion)) || "{}") : {};
+      if (que === "carpetas" && metodo === "POST" && !id) return json(await biblioteca.crearCarpeta(quien, cuerpo));
+      if (que === "carpetas" && metodo === "PUT" && id) return json(await biblioteca.cambiarCarpeta(quien, id, cuerpo));
+      if (que === "carpetas" && metodo === "DELETE" && id) return json(await biblioteca.borrarCarpeta(quien, id));
+      if (que === "elementos" && metodo === "POST" && !id) return json(await biblioteca.crearElemento(quien, cuerpo));
+      if (que === "elementos" && metodo === "PUT" && id) return json(await biblioteca.cambiarElemento(quien, id, cuerpo));
+      if (que === "elementos" && metodo === "DELETE" && id) return json(await biblioteca.borrarElemento(quien, id));
+      return [404, "No existe."];
+    } catch (error) {
+      if (error instanceof ErrorDeBiblioteca) return [error.estado, error.message];
+      if (error instanceof SyntaxError) return [400, "Lo enviado no es JSON."];
+      return [422, error.message];
+    }
   }
 
   const servidor = new Hocuspocus({
@@ -187,6 +294,12 @@ export function crearServidor({ aplicaciones, carpeta, espera = 2000, esperaMaxi
       } else {
         document.getText(CAMPO).insert(0, remoto.texto || "");
         versiones.set(documentName, remoto.version);
+        // Lo elegido (plantilla, membrete) no lo tiene la aplicación: se conserva de la copia.
+        if (copia) {
+          const anterior = new Y.Doc();
+          Y.applyUpdate(anterior, copia.estado);
+          for (const [clave, valor] of anterior.getMap(OPCIONES).entries()) document.getMap(OPCIONES).set(clave, valor);
+        }
       }
     },
 
@@ -227,7 +340,19 @@ export function crearServidor({ aplicaciones, carpeta, espera = 2000, esperaMaxi
     // Las direcciones HTTP (ver arriba).
     async onRequest({ request, response }) {
       const direccion = new URL(request.url, "http://editor");
+      // Antes de llamar desde otra web, el navegador pregunta si puede (CORS).
+      if (request.method === "OPTIONS") {
+        for (const [nombre, valor] of Object.entries(ABIERTO)) response.setHeader(nombre, valor);
+        responder(response, 204, "");
+      }
       if (request.method === "GET" && direccion.pathname === "/salud") responder(response, 200, "bien");
+      if (direccion.pathname === "/biblioteca" || direccion.pathname.startsWith("/biblioteca/")) {
+        for (const [nombre, valor] of Object.entries(ABIERTO)) response.setHeader(nombre, valor);
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        response.setHeader("Cache-Control", "private, no-store");
+        const [estado, contenido, tipo] = await atenderBiblioteca(request, direccion);
+        responder(response, estado, contenido, tipo);
+      }
       if (request.method === "GET" && direccion.pathname === "/cliente.js") {
         const codigo = await readFile(join(RAIZ, "publico", "cliente.js")).catch(() => null);
         if (codigo === null) responder(response, 404, "Falta construir el cliente: npm run construir");
@@ -277,7 +402,7 @@ export function crearServidor({ aplicaciones, carpeta, espera = 2000, esperaMaxi
 // Si se ejecuta este fichero directamente (y no desde las pruebas), arranca el servidor.
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const puerto = Number(process.env.EDITOR_PUERTO || 1234);
-  const servidor = crearServidor({ aplicaciones: leerAplicaciones(), carpeta: process.env.EDITOR_DATOS || join(RAIZ, "datos") });
+  const servidor = crearServidor({ aplicaciones: leerAplicaciones(), carpeta: process.env.EDITOR_DATOS || join(RAIZ, "datos"), clave: leerClave() });
   await servidor.listen(puerto);
-  console.log(`Editor colaborativo en marcha en el puerto ${puerto}.`);
+  console.log(`Editor colaborativo en marcha en el puerto ${puerto}${leerClave() ? "" : " (sin biblioteca: falta EDITOR_CLAVE)"}.`);
 }
