@@ -259,6 +259,8 @@ function montar(elemento, opciones) {
     boton.type = "button";
     boton.title = descripcion;
     boton.setAttribute("aria-label", descripcion);
+    if (etiqueta === "B") boton.style.fontWeight = "700";
+    if (etiqueta === "I") boton.style.fontStyle = "italic";
     boton.addEventListener("click", () => aplicarFormato(vista, accion));
     botonesDeFormato.push(boton);
     barra.append(boton);
@@ -378,7 +380,7 @@ function montar(elemento, opciones) {
     const linea = crear("p");
     const nombre = crear("span", "ec-quien", quien);
     nombre.style.color = colorDeQuien || "inherit";
-    linea.append(nombre, " ", crear("span", "ec-cuando", new Date(cuando).toLocaleString()), crear("br"), que);
+    linea.append(nombre, " ", crear("span", "ec-cuando", new Date(cuando).toLocaleString("es", { dateStyle: "short", timeStyle: "short" })), crear("br"), que);
     return linea;
   }
   // Cuadro de escribir con sus botones.
