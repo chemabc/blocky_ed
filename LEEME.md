@@ -4,7 +4,8 @@ Servicio aparte (Node) en el que varias personas escriben a la vez el mismo text
 asambleas, pero no depende de ella: **cualquier aplicación** puede usarlo con un nombre, un secreto y dos
 direcciones. La carpeta está pensada para salir algún día a su propio repositorio sin cambiar nada.
 
-Licencias: todo lo que usa es MIT (Yjs, Hocuspocus, CodeMirror, y-codemirror.next, ws, esbuild).
+Licencias: MIT (Yjs, Hocuspocus, CodeMirror, y-codemirror.next, markdown-it, ws, esbuild) y Apache-2.0 (el
+compilador de Typst para Node, de typst.ts).
 
 ## Piezas
 
@@ -14,8 +15,23 @@ Licencias: todo lo que usa es MIT (Yjs, Hocuspocus, CodeMirror, y-codemirror.nex
 | `src/pases.mjs` | Lee los pases (JWT HS256) y firma y comprueba las peticiones entre servidores. |
 | `src/aplicaciones.mjs` | Las aplicaciones dadas de alta y las dos llamadas que les hace. |
 | `src/almacen.mjs` | Su propia copia de cada sala (estado de Yjs y versión), en ficheros. |
-| `src/cliente/editor.mjs` | El editor en el navegador (CodeMirror + Yjs); se construye en `publico/cliente.js`. |
-| `prueba/` | Pruebas con `node --test`: los pases y una sala con dos personas de verdad. |
+| `src/typst.mjs` | De Markdown a Typst y la plantilla común (A4, letra, título). |
+| `src/renderizador.mjs` | Compila con Typst en un hilo aparte, con tiempo máximo, en una carpeta vacía. |
+| `src/cliente/editor.mjs` | El editor en el navegador: barra de formato, texto, comentarios y vista Typst; se construye en `publico/cliente.js`. |
+| `prueba/` | Pruebas con `node --test`: pases, Typst y una sala con varias personas de verdad. |
+
+## Lo que ve quien escribe
+
+- **Barra de formato** arriba: negrita, cursiva, título, listas, cita, enlace, código, tabla y separador.
+  Escribe las marcas de Markdown o de Typst, según el formato del texto.
+- **Vista Typst** (botón): enciende un panel al lado con el resultado compilado, que se pone al día poco
+  después de cada cambio. Apagada, el panel no se ve y no se compila nada. **Previsualizar** compila una
+  vez (por ejemplo, antes de descargar) y **PDF** lo descarga.
+- **Comentarios**: se selecciona un trozo y «💬 Comentar». El trozo queda resaltado; al pulsarlo sale un
+  bocadillo debajo con el hilo, «Responder» y «✓ Resuelto». «↓ 💬» va al siguiente. Los comentarios se
+  anclan al texto (posiciones relativas de Yjs): siguen en su sitio aunque se escriba alrededor.
+- **Cuántos a la vez**: si el pase dice un máximo de personas escribiendo (o comentando) y ya están, se
+  entra a leer con un aviso.
 
 ## Cómo se usa desde una aplicación
 
@@ -27,7 +43,9 @@ Licencias: todo lo que usa es MIT (Yjs, Hocuspocus, CodeMirror, y-codemirror.nex
    - `sala`: qué texto, con el nombre que quiera la aplicación (`documentos.documento:12`);
    - `alias`: cómo se llama la persona;
    - `permiso`: `leer`, `comentar` o `escribir`;
-   - `exp`: hasta cuándo vale, en pocos minutos.
+   - `exp`: hasta cuándo vale, en pocos minutos;
+   - opcionales: `formato` (`markdown` o `typst`), `titulo` (para el PDF), `max_escritores` y
+     `max_comentaristas` (cuántas personas a la vez con ese permiso).
 3. **Pintar el editor** en su página:
 
    ```html
@@ -36,13 +54,14 @@ Licencias: todo lo que usa es MIT (Yjs, Hocuspocus, CodeMirror, y-codemirror.nex
    <script>
      EditorColaborativo.montar(document.getElementById("cuadro"), {
        url: "ws://localhost:1234", sala: "asambleas/documentos.documento:12", pase: "…",
-       alias: "Lince", color: "#7c3aed", permiso: "escribir",
+       alias: "Lince", color: "#7c3aed", permiso: "escribir", formato: "markdown",
+       pedirPase: async () => "…",  // uno nuevo: al reconectar y para compilar
        alCambiar: (texto) => {}, alPersonas: (lista) => {}, alEstado: (estado) => {},
      });
    </script>
    ```
 
-   `pase` puede ser una función que devuelva uno nuevo: se llama al reconectar.
+   Los colores se adaptan con variables CSS (`--ec-borde`, `--ec-acento`, `--ec-resalte`, `--ec-fondo`).
 4. **Responder a dos llamadas** del editor (firmadas, ver abajo):
    - `GET <url>/texto/?sala=…`: devuelve `{"texto", "version"}`. Es el texto con el que empieza una sala
      que el editor no tiene, o que la aplicación ha cambiado por su cuenta.
@@ -85,20 +104,25 @@ EDITOR_APLICACIONES='{"asambleas":{"secreto":"s","url":"http://localhost:8000/ed
 En el contenedor de desarrollo hay un servicio `editor` que hace todo esto solo (ver
 `.devcontainer/docker-compose.yml`).
 
-## Por hacer (esqueleto)
+## Typst
 
-- **PDF con Typst.** La dirección `GET /pdf?pase=…` ya comprueba el pase y responde 501. El plan:
-  - meter el programa `typst` (Apache-2.0) en la imagen del editor;
-  - una plantilla por aplicación y tipo de texto (`plantillas/<app>/<tipo>.typ`), con su cabecera, su pie y
-    sus estilos;
-  - si el texto es Markdown, convertirlo dentro de Typst con el paquete `cmarker` (MIT), guardado en la
-    imagen para no descargarlo en cada arranque;
-  - compilar en una carpeta temporal y devolver el PDF.
-- **Comentarios dentro del texto**, anclados a un trozo (Yjs los guarda como posiciones relativas que
-  sobreviven a los cambios). Hoy el permiso `comentar` solo deja leer.
+- `POST /render` (cuerpo `pase=…`) devuelve el SVG; `GET /pdf?pase=…` descarga el PDF. Sirven para
+  cualquier origen: lo que protege es el pase.
+- Markdown se convierte a Typst (`src/typst.mjs`); lo escrito se escapa. El Typst escrito a mano va tal
+  cual. Los dos llevan delante la plantilla común.
+- **Seguridad:**
+  - compila en un hilo aparte, con 8 segundos como mucho (si no, se mata el hilo);
+  - de una en una, en una carpeta vacía: no puede leer ficheros del servidor;
+  - no se permiten paquetes (`@preview/…`), que se descargarían de internet;
+  - los resultados se recuerdan mientras el texto no cambie.
+
+## Por hacer
+
+- **Plantillas por aplicación y tipo de texto** (`plantillas/<app>/<tipo>.typ`), con cabecera y pie propios.
 - **Autoría fina:** hoy se sabe quién ha escrito en cada intervalo de unos segundos. Con
   `Y.PermanentUserData` se sabría letra a letra.
 - **Expulsar a una persona** sin cerrar la sala para todo el mundo.
 - **Pases asimétricos** (Ed25519): el editor solo podría comprobar pases, no fabricarlos. Conviene cuando
   lo usen aplicaciones de otras personas.
 - **Varias instancias** del editor (Hocuspocus tiene una extensión para repartir salas con Redis).
+- **Avisar a la aplicación de los comentarios** (hoy viven solo en el editor).
