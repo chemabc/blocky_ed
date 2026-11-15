@@ -60,6 +60,17 @@ const ABIERTO = {
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE",
 };
 
+// Un rechazo al entrar en una sala, con su motivo para el navegador. Hocuspocus manda al cliente el campo
+// «reason» del error; el cliente (cliente/editor.mjs) lo traduce en un aviso que explica qué pasa.
+//   - clase: «pase» (el pase no vale: caducado, firma, otra sala) o «aplicacion» (la aplicación no da el
+//     texto: no responde o rechaza la petición del editor).
+//   - mensaje: el detalle, en lenguaje llano.
+function rechazo(clase, mensaje) {
+  const error = new Error(mensaje);
+  error.reason = `${clase}: ${mensaje}`;
+  return error;
+}
+
 // Separa el nombre interno de una sala en su aplicación, su sala y si es la de comentarios
 // («asambleas/documentos.documento:12#comentarios»).
 function partes(nombre) {
@@ -241,9 +252,14 @@ export function crearServidor({ aplicaciones, carpeta, clave = null, espera = 20
     // texto solo cambia quien escribe; en la de comentarios, también quien comenta (Hocuspocus descarta lo
     // que intente cambiar quien no puede). Lo devuelto queda como «context».
     async onAuthenticate({ token, documentName, connection, socketId }) {
-      const datos = leerPase(token, aplicaciones);
+      let datos;
+      try {
+        datos = leerPase(token, aplicaciones);
+      } catch (error) {
+        throw rechazo("pase", error.message);
+      }
       const { app, sala, comentarios } = partes(documentName);
-      if (datos.app !== app || datos.sala !== sala) throw new Error("El pase es de otra sala.");
+      if (datos.app !== app || datos.sala !== sala) throw rechazo("pase", "El pase es de otra sala.");
       let permiso = datos.permiso;
       const limite = { escribir: datos.max_escritores, comentar: datos.max_comentaristas }[permiso];
       const textoDeLaSala = nombreDeSala(app, sala);
@@ -286,7 +302,9 @@ export function crearServidor({ aplicaciones, carpeta, clave = null, espera = 20
       try {
         remoto = await pedirTexto(aplicaciones[app], sala);
       } catch (error) {
-        if (!copia) throw error;
+        // Sin copia propia no hay con qué empezar: se dice a quien entra que falla la aplicación, no su pase.
+        console.error(`No se puede abrir «${documentName}»: ${error.message}`);
+        if (!copia) throw rechazo("aplicacion", error.message);
       }
       if (copia && (remoto === null || remoto.version === copia.version)) {
         Y.applyUpdate(document, copia.estado);

@@ -127,6 +127,19 @@ function aplicarFormato(vista, [tipo, a, b, ejemplo]) {
   vista.focus();
 }
 
+// Explica en lenguaje llano por qué el servidor no deja entrar en una sala, a partir del motivo que manda
+// (servidor.mjs, rechazo): «pase: …» si el pase no vale; «aplicacion: …» si la aplicación no da el texto.
+//   - motivo: el texto que llega con el rechazo (puede faltar en servidores viejos).
+function explicarRechazo(motivo = "") {
+  const [clase, ...resto] = String(motivo).split(": ");
+  const detalle = resto.join(": ");
+  if (clase === "aplicacion") {
+    return `El editor no consigue el texto de la aplicación (${detalle}). No es cosa de tu permiso: avisa a quien mantiene la plataforma.`;
+  }
+  if (clase === "pase") return `No puedes entrar en este texto: ${detalle} Recarga la página para pedir un pase nuevo.`;
+  return "No puedes entrar en este texto (el pase no vale o ha caducado). Recarga la página.";
+}
+
 // Monta el editor dentro de un elemento de la página. Devuelve { vista, proveedor, destruir }.
 //   - url: dirección WebSocket del servidor («ws://localhost:1234»); la HTTP se saca de ella.
 //   - sala: nombre completo de la sala («asambleas/documentos.documento:12»).
@@ -608,8 +621,8 @@ function montar(elemento, opciones) {
       aviso.hidden = false;
     }
   });
-  proveedor.on("authenticationFailed", () => {
-    aviso.textContent = "No puedes entrar en este texto (el pase no vale o ha caducado). Recarga la página.";
+  proveedor.on("authenticationFailed", ({ reason } = {}) => {
+    aviso.textContent = explicarRechazo(reason);
     aviso.hidden = false;
   });
   proveedor.on("synced", () => alCambiar?.(texto.toString()));
