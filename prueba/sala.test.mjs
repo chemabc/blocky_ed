@@ -13,6 +13,7 @@ import { test } from "node:test";
 
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import WebSocket from "ws";
+import * as Y from "yjs";
 
 import { crearPase, firmaValida } from "../src/pases.mjs";
 import { crearServidor } from "../src/servidor.mjs";
@@ -58,6 +59,7 @@ function cerrar(proveedor) {
 
 test("dos personas en una sala", async () => {
   const guardados = [];
+  const comentariosRecibidos = [];
   // La aplicación de mentira: responde al texto inicial y apunta los guardados (si la firma vale).
   const aplicacion = createServer(async (peticion, respuesta) => {
     let cuerpo = "";
@@ -69,6 +71,10 @@ test("dos personas en una sala", async () => {
     }
     respuesta.writeHead(200, { "Content-Type": "application/json" });
     if (peticion.method === "GET") return respuesta.end(JSON.stringify({ texto: "## Puntos\n", version: 1 }));
+    if (peticion.url.startsWith("/comentarios/")) {
+      comentariosRecibidos.push(JSON.parse(cuerpo));
+      return respuesta.end("{}");
+    }
     guardados.push(JSON.parse(cuerpo));
     respuesta.end(JSON.stringify({ version: 1 + guardados.length }));
   });
@@ -95,8 +101,21 @@ test("dos personas en una sala", async () => {
     garza.document.getText("texto").insert(0, "Garza ");
     nutria.comentarios.document.getArray("comentarios").push(["de Nutria"]);
     await hasta(() => lince.comentarios.document.getArray("comentarios").length > 0);
+    // Un comentario de verdad (con su trozo): le llega a la aplicación con la cita.
+    const mapa = new Y.Map();
+    const textoDeLince = lince.document.getText("texto");
+    mapa.set("id", "c1");
+    mapa.set("alias", "Lince");
+    mapa.set("texto", "¿Seguro?");
+    mapa.set("cuando", 1);
+    mapa.set("desde", Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(textoDeLince, 13)));
+    mapa.set("hasta", Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(textoDeLince, 19)));
+    mapa.set("respuestas", new Y.Array());
+    lince.comentarios.document.getArray("comentarios").push([mapa]);
+    await hasta(() => comentariosRecibidos.some((r) => r.comentarios.length));
+    assert.deepEqual(comentariosRecibidos.at(-1).comentarios[0], { id: "c1", alias: "Lince", texto: "¿Seguro?", cuando: 1, resuelto: false, cita: "Huerto", respuestas: [] });
     await new Promise((listo) => setTimeout(listo, 200));
-    assert.deepEqual(lince.comentarios.document.getArray("comentarios").toArray(), ["de Garza"]);
+    assert.deepEqual(lince.comentarios.document.getArray("comentarios").toArray().slice(0, 1), ["de Garza"]);
     assert.ok(!lince.document.getText("texto").toString().includes("Garza"));
     // Con un máximo de un escritor, la segunda persona que escribe entra a leer y se le avisa.
     const zorro = await conectar(puerto, "Zorro", "escribir", { max_escritores: 1 });

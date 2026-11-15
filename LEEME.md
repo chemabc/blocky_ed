@@ -62,11 +62,14 @@ compilador de Typst para Node, de typst.ts).
    ```
 
    Los colores se adaptan con variables CSS (`--ec-borde`, `--ec-acento`, `--ec-resalte`, `--ec-fondo`).
-4. **Responder a dos llamadas** del editor (firmadas, ver abajo):
+4. **Responder a las llamadas** del editor (firmadas, ver abajo):
    - `GET <url>/texto/?sala=…`: devuelve `{"texto", "version"}`. Es el texto con el que empieza una sala
      que el editor no tiene, o que la aplicación ha cambiado por su cuenta.
    - `POST <url>/guardado/` con `{"sala", "texto", "alias": [...], "version"}`: guarda lo escrito y
      devuelve `{"version"}`. Si ya no acepta cambios, responde 409 y el editor cierra la sala.
+   - Opcional: `POST <url>/comentarios/` con `{"sala", "comentarios": [...]}`: todos los comentarios de la
+     sala cada vez que cambian (con el trozo que comentan, `cita`), para que la aplicación los guarde. Si
+     responde 404, el editor entiende que no los quiere.
 5. **Cerrar una sala** cuando cambian los permisos (por ejemplo, al aprobar un acta): `POST /salas/cerrar`
    con `{"sala"}`, la cabecera `X-Editor-App` y la firma. Quien vuelva a entrar trae un pase nuevo.
 
@@ -125,4 +128,3 @@ En el contenedor de desarrollo hay un servicio `editor` que hace todo esto solo 
 - **Pases asimétricos** (Ed25519): el editor solo podría comprobar pases, no fabricarlos. Conviene cuando
   lo usen aplicaciones de otras personas.
 - **Varias instancias** del editor (Hocuspocus tiene una extensión para repartir salas con Redis).
-- **Avisar a la aplicación de los comentarios** (hoy viven solo en el editor).

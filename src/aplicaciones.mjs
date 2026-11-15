@@ -4,7 +4,7 @@
 // en la que el editor la llama. Se leen de la variable de entorno EDITOR_APLICACIONES, en JSON:
 //   {"asambleas": {"secreto": "…", "url": "http://app:8000/editor"}}
 //
-// Cada aplicación responde a dos llamadas del editor (las dos firmadas; ver pases.mjs):
+// Cada aplicación responde a estas llamadas del editor (todas firmadas; ver pases.mjs):
 //   - GET  <url>/texto/?sala=<sala>  →  {"texto": "…", "version": 3}
 //       El texto con el que empieza una sala que el editor aún no tiene (o que la aplicación ha
 //       cambiado por su cuenta: su versión ya no coincide).
@@ -12,6 +12,10 @@
 //       Lo escrito, cada pocos segundos mientras se escribe, con quién ha escrito desde el último aviso.
 //       La aplicación lo guarda (autoría, registro de cambios…) y devuelve su versión nueva. Si responde
 //       409, ya no acepta cambios (el texto se ha aprobado): el editor cierra la sala.
+//   - POST <url>/comentarios/  con {"sala", "comentarios": [...]}  (opcional)
+//       Todos los comentarios de la sala, cada vez que cambian, para que la aplicación los guarde. Cada uno:
+//       {"id", "alias", "texto", "cuando", "resuelto", "cita" (el trozo comentado, como está ahora),
+//       "respuestas": [{"alias", "texto", "cuando"}]}. Si la aplicación responde 404, no los quiere.
 
 import { cabecerasFirmadas } from "./pases.mjs";
 
@@ -43,4 +47,15 @@ export async function avisarGuardado(aplicacion, datos) {
   if (respuesta.status === 409) return { cerrada: true };
   if (!respuesta.ok) throw new Error(`La aplicación no ha guardado «${datos.sala}» (${respuesta.status}).`);
   return respuesta.json();
+}
+
+// Manda a la aplicación todos los comentarios de una sala. Si no los quiere (404), no pasa nada.
+export async function avisarComentarios(aplicacion, datos) {
+  const cuerpo = JSON.stringify(datos);
+  const respuesta = await fetch(`${aplicacion.url}/comentarios/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...cabecerasFirmadas(cuerpo, aplicacion.secreto) },
+    body: cuerpo,
+  });
+  if (!respuesta.ok && respuesta.status !== 404) throw new Error(`La aplicación no ha guardado los comentarios de «${datos.sala}» (${respuesta.status}).`);
 }

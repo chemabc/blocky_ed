@@ -30,7 +30,7 @@ import { Hocuspocus } from "@hocuspocus/server";
 import * as Y from "yjs";
 
 import { guardar, leer } from "./almacen.mjs";
-import { avisarGuardado, leerAplicaciones, pedirTexto } from "./aplicaciones.mjs";
+import { avisarComentarios, avisarGuardado, leerAplicaciones, pedirTexto } from "./aplicaciones.mjs";
 import { firmaValida, leerPase, nombreDeSala } from "./pases.mjs";
 import { pararRenderizador, renderizar } from "./renderizador.mjs";
 import { componer } from "./typst.mjs";
@@ -82,6 +82,25 @@ export function crearServidor({ aplicaciones, carpeta, espera = 2000, esperaMaxi
   const versiones = new Map();
   // Quién está dentro de cada sala y con qué permiso: nombre de sala → Map(conexión → permiso).
   const presentes = new Map();
+  // Salas de comentarios que han cambiado desde el último aviso a la aplicación.
+  const comentariosCambiados = new Set();
+
+  // Los comentarios de una sala como datos sencillos, con el trozo que comentan tal como está ahora (si el
+  // texto está abierto; si no, sin cita).
+  function listaDeComentarios(documento, nombreDelTexto) {
+    const texto = servidor.documents.get(nombreDelTexto);
+    // El trozo de texto entre dos posiciones relativas guardadas, o "" si no se puede saber.
+    const cita = (desde, hasta) => {
+      if (!texto || !desde || !hasta) return "";
+      const a = Y.createAbsolutePositionFromRelativePosition(Y.createRelativePositionFromJSON(desde), texto);
+      const b = Y.createAbsolutePositionFromRelativePosition(Y.createRelativePositionFromJSON(hasta), texto);
+      return a && b && b.index > a.index ? texto.getText(CAMPO).toString().slice(a.index, b.index) : "";
+    };
+    return documento.getArray("comentarios").toArray().filter((c) => c instanceof Y.Map).map((c) => ({
+      id: c.get("id"), alias: c.get("alias"), texto: c.get("texto"), cuando: c.get("cuando"), resuelto: Boolean(c.get("resuelto")),
+      cita: cita(c.get("desde"), c.get("hasta")), respuestas: (c.get("respuestas")?.toArray() || []).map(({ alias, texto: t, cuando }) => ({ alias, texto: t, cuando })),
+    }));
+  }
 
   // Cuántas personas hay en una sala con un permiso.
   function cuantos(nombre, permiso) {
@@ -171,9 +190,14 @@ export function crearServidor({ aplicaciones, carpeta, espera = 2000, esperaMaxi
       }
     },
 
-    // Cada cambio: apunta quién lo ha hecho (para la autoría que guarda la aplicación).
+    // Cada cambio: apunta quién lo ha hecho (para la autoría que guarda la aplicación). En la sala de
+    // comentarios, solo que han cambiado (se mandan todos a la aplicación al guardar).
     async onChange({ documentName, context }) {
-      if (context?.permiso !== "escribir" || partes(documentName).comentarios) return;
+      if (partes(documentName).comentarios) {
+        comentariosCambiados.add(documentName);
+        return;
+      }
+      if (context?.permiso !== "escribir") return;
       if (!autores.has(documentName)) autores.set(documentName, new Set());
       autores.get(documentName).add(context.alias);
     },
@@ -181,6 +205,10 @@ export function crearServidor({ aplicaciones, carpeta, espera = 2000, esperaMaxi
     // Unos segundos después de los cambios: avisa a la aplicación con el texto y quién ha escrito, y guarda
     // su propia copia. Si la aplicación ya no acepta cambios, echa a todo el mundo de la sala.
     async onStoreDocument({ document, documentName }) {
+      if (partes(documentName).comentarios && comentariosCambiados.delete(documentName)) {
+        const { app, sala } = partes(documentName);
+        await avisarComentarios(aplicaciones[app], { sala, comentarios: listaDeComentarios(document, nombreDeSala(app, sala)) });
+      }
       const quienes = autores.get(documentName);
       autores.set(documentName, new Set());
       if (quienes?.size && !partes(documentName).comentarios) {
