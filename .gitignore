@@ -1,0 +1,4 @@
+# Lo que no va al historial: librerías (npm install), el cliente construido (npm run construir) y la copia de las salas
+node_modules/
+publico/
+datos/
