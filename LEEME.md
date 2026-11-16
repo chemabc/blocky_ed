@@ -40,6 +40,14 @@ compilador de Typst para Node, de typst.ts).
   (una imagen se mete como `![nombre](imagen:<número>)` en Markdown o `#image("/imagenes/<número>")` en Typst).
 - **Cuántos a la vez**: si el pase dice un máximo de personas escribiendo (o comentando) y ya están, se
   entra a leer con un aviso.
+- **Sesiones largas y cortes de conexión.** El pase solo se mira al entrar en la sala: una vez dentro, la
+  conexión dura las horas que haga falta. Si se corta (wifi, el portátil se duerme, se reinicia el editor),
+  el cliente pide un pase nuevo a la aplicación (`pedirPase`), vuelve a entrar y manda lo escrito mientras
+  tanto. Si en 5 segundos no ha vuelto, sale un **aviso rojo** («no cierres esta pestaña») y, mientras no hay
+  conexión, se guarda una **copia del texto en el navegador** (`localStorage`, una por pestaña), que se borra
+  al volver y quedar todo enviado. Si la pestaña se cerró antes, al abrir de nuevo el texto se ofrecen las
+  copias que no coinciden con el texto de ahora, para copiarlas y pegar lo que falte (no se mezclan solas:
+  podrían duplicar trozos). Cerrar la pestaña sin conexión y con algo sin enviar pide confirmación.
 
 ## Cómo se usa desde una aplicación
 

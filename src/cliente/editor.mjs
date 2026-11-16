@@ -9,7 +9,9 @@
 //     cada cambio. Apagado, no se ve ni se pide nada al servidor;
 //   - los comentarios, como trozos de texto resaltados; al pulsar uno, sale su bocadillo con las respuestas;
 //   - si la aplicación usa la biblioteca (opción «biblioteca»), los desplegables «Plantilla» y «Cabecera y
-//     pie» y el cajón de fragmentos e imágenes (ver biblioteca.mjs).
+//     pie» y el cajón de fragmentos e imágenes (ver biblioteca.mjs);
+//   - si se corta la conexión, un aviso rojo y una copia de lo escrito en el navegador, que se ofrece para
+//     recuperarla si la pestaña se cerró antes de volver la conexión.
 //
 // Sin colores de Markdown a propósito: pesan el doble y el resultado ya se ve en la vista Typst.
 
@@ -67,6 +69,11 @@ const ESTILOS = `
 .ec-separa{width:1px;align-self:stretch;background:var(--ec-borde);margin:0 .2rem}
 .ec-hueco{flex:1}
 .ec-aviso{border:1px solid #f59e0b;border-radius:.4rem;padding:.3rem .5rem;font-size:.85em}
+.ec-sin-conexion{border:2px solid #dc2626;background:rgba(220,38,38,.12);border-radius:.4rem;padding:.4rem .6rem;font-weight:600}
+.ec-copia details{margin-top:.25rem}
+.ec-copia summary{cursor:pointer}
+.ec-copia textarea{width:100%;box-sizing:border-box;min-height:8rem;font-family:ui-monospace,monospace;font-size:.95em;color:inherit;background:none;border:1px solid var(--ec-borde);border-radius:.3rem;padding:.3rem}
+.ec-copia button{font:inherit;color:inherit;background:none;border:1px solid var(--ec-borde);border-radius:.3rem;padding:.1rem .45rem;cursor:pointer;margin-right:.3rem}
 .ec-cuerpo{display:grid;gap:.5rem;grid-template-columns:minmax(0,1fr)}
 .ec-cuerpo.con-panel{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
 @media (max-width:900px){.ec-cuerpo.con-panel{grid-template-columns:minmax(0,1fr)}}
@@ -205,7 +212,28 @@ function montar(elemento, opciones) {
   imagen.alt = "Resultado compilado con Typst";
   panel.append(estadoDelPanel, imagen);
   cuerpo.append(cajaDeTexto, panel);
-  raiz.append(barra, aviso, cuerpo);
+
+  // ── Sin conexión: aviso rojo y copia en este navegador ──
+  // Si se corta la conexión, lo escrito sigue en la pestaña y se manda solo al volver (Yjs lo junta con lo
+  // de las demás). Para que nada se pierda aunque se cierre o se recargue la pestaña, mientras no hay
+  // conexión se guarda una copia del texto en este navegador (localStorage), una por pestaña; cuando
+  // vuelve la conexión y todo queda enviado, se borra. Si al abrir el texto quedan copias de otra vez que
+  // no coinciden con el texto de ahora, se enseñan para recuperarlas a mano (copiar y pegar): mezclarlas
+  // solas podría duplicar trozos.
+  const sinConexion = crear("div", "ec-sin-conexion");
+  sinConexion.setAttribute("role", "alert");
+  sinConexion.hidden = true;
+  const avisoDeCopias = crear("div", "ec-aviso ec-copia");
+  avisoDeCopias.hidden = true;
+  const prefijoDeCopias = `editor-colaborativo:copia:${sala}:`;
+  const miCopia = `${prefijoDeCopias}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const copiasAnteriores = leerCopiasAnteriores();
+  // Si la sala está al día con el servidor (entrada y sincronizada) y desde cuándo no lo está.
+  let conectado = false;
+  let desconectadoDesde = null;
+  let relojDeDesconexion = null;
+
+  raiz.append(barra, aviso, sinConexion, avisoDeCopias, cuerpo);
   elemento.replaceChildren(raiz);
 
   // ── El texto (CodeMirror) ──
@@ -259,6 +287,7 @@ function montar(elemento, opciones) {
         resaltes,
         EditorView.updateListener.of((cambio) => {
           if (cambio.docChanged) {
+            if (!conectado) guardarCopia();
             alCambiar?.(cambio.state.doc.toString());
             vistaTypst.cambio();
           }
@@ -629,8 +658,119 @@ function montar(elemento, opciones) {
     aviso.textContent = explicarRechazo(reason);
     aviso.hidden = false;
   });
-  proveedor.on("synced", () => alCambiar?.(texto.toString()));
-  proveedor.on("status", ({ status }) => alEstado?.(status));
+  proveedor.on("synced", () => {
+    alCambiar?.(texto.toString());
+    alVolverLaConexion();
+  });
+  proveedor.on("status", ({ status }) => {
+    alEstado?.(status);
+    if (status !== "connected") alPerderLaConexion();
+  });
+  proveedor.on("unsyncedChanges", (pendientes) => {
+    if (pendientes === 0 && conectado) borrarCopia();
+  });
+
+  // Las copias que dejaron otras pestañas de esta sala en este navegador: [{ clave, texto, cuando }].
+  function leerCopiasAnteriores() {
+    try {
+      return Object.keys(localStorage)
+        .filter((clave) => clave.startsWith(prefijoDeCopias))
+        .map((clave) => ({ clave, ...JSON.parse(localStorage.getItem(clave)) }))
+        .filter((copia) => typeof copia.texto === "string");
+    } catch {
+      return [];
+    }
+  }
+  // Guarda (o pone al día) la copia de esta pestaña. Solo quien escribe: quien lee no tiene nada que perder.
+  function guardarCopia() {
+    if (permiso !== "escribir") return;
+    try {
+      localStorage.setItem(miCopia, JSON.stringify({ texto: texto.toString(), cuando: Date.now() }));
+    } catch {
+      // Sin almacenamiento (navegación privada, lleno…): lo escrito sigue en la pestaña.
+    }
+  }
+  // Borra una copia (la de esta pestaña, si no se dice otra).
+  function borrarCopia(clave = miCopia) {
+    try {
+      localStorage.removeItem(clave);
+    } catch {
+      // Nada que borrar.
+    }
+  }
+  // Pinta el aviso de las copias de otra vez: cada una plegada, con su fecha, «Copiar el texto» y «Descartar».
+  function pintarCopias() {
+    avisoDeCopias.replaceChildren();
+    avisoDeCopias.hidden = copiasAnteriores.length === 0;
+    if (avisoDeCopias.hidden) return;
+    avisoDeCopias.append(crear("strong", "", "Hay texto escrito sin conexión que quizá no llegó a guardarse."));
+    avisoDeCopias.append(crear("span", "", " Ábrelo, cópialo y pega lo que falte; después, descártalo."));
+    for (const copia of copiasAnteriores) {
+      const plegable = crear("details");
+      plegable.append(crear("summary", "", `Copia guardada en este navegador el ${new Date(copia.cuando).toLocaleString("es-ES")}`));
+      const caja = crear("textarea");
+      caja.readOnly = true;
+      caja.value = copia.texto;
+      const copiar = crear("button", "", "Copiar el texto");
+      copiar.type = "button";
+      copiar.addEventListener("click", async () => {
+        caja.select();
+        try {
+          await navigator.clipboard.writeText(copia.texto);
+          copiar.textContent = "Copiado ✓";
+        } catch {
+          copiar.textContent = "Selecciona y copia con Ctrl+C";
+        }
+      });
+      const descartar = crear("button", "", "Descartar");
+      descartar.type = "button";
+      descartar.addEventListener("click", () => {
+        borrarCopia(copia.clave);
+        copiasAnteriores.splice(copiasAnteriores.indexOf(copia), 1);
+        pintarCopias();
+      });
+      plegable.append(caja, copiar, descartar);
+      avisoDeCopias.append(plegable);
+    }
+  }
+  // Ya conectada y al día: quita el aviso rojo, borra la copia de esta pestaña si ya está todo enviado y
+  // olvida las copias de otra vez que coinciden con el texto de ahora (ya están dentro).
+  function alVolverLaConexion() {
+    conectado = true;
+    desconectadoDesde = null;
+    clearTimeout(relojDeDesconexion);
+    sinConexion.hidden = true;
+    if (!proveedor.hasUnsyncedChanges) borrarCopia();
+    const ahora = texto.toString();
+    for (const copia of [...copiasAnteriores]) {
+      if (copia.texto === ahora) {
+        borrarCopia(copia.clave);
+        copiasAnteriores.splice(copiasAnteriores.indexOf(copia), 1);
+      }
+    }
+    pintarCopias();
+  }
+  // Se ha cortado la conexión: guarda la copia y, si en 5 segundos no ha vuelto, enseña el aviso rojo.
+  function alPerderLaConexion() {
+    if (desconectadoDesde !== null) return;
+    conectado = false;
+    desconectadoDesde = new Date();
+    guardarCopia();
+    clearTimeout(relojDeDesconexion);
+    relojDeDesconexion = setTimeout(() => {
+      const hora = desconectadoDesde.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+      sinConexion.textContent = permiso === "escribir"
+        ? `Sin conexión con el editor desde las ${hora}. Lo que escribes se guarda en este navegador y se enviará solo al volver la conexión: no cierres esta pestaña.`
+        : `Sin conexión con el editor desde las ${hora}: lo que ves puede no estar al día. Se vuelve a conectar solo.`;
+      sinConexion.hidden = false;
+    }, 5000);
+  }
+  // Al intentar cerrar o recargar la pestaña sin conexión y con algo escrito: el navegador pregunta antes.
+  function avisarAlSalir(evento) {
+    if (!conectado && permiso === "escribir" && proveedor.hasUnsyncedChanges) evento.preventDefault();
+  }
+  window.addEventListener("beforeunload", avisarAlSalir);
+  pintarCopias();
   proveedor.awareness.on("change", () => alPersonas?.([...proveedor.awareness.getStates().values()].map((estado) => estado.user).filter(Boolean)));
 
   return {
@@ -639,6 +779,8 @@ function montar(elemento, opciones) {
     // Desconecta y quita el editor de la página (al salir de la pantalla).
     destruir() {
       clearTimeout(vistaTypst.reloj);
+      clearTimeout(relojDeDesconexion);
+      window.removeEventListener("beforeunload", avisarAlSalir);
       if (vistaTypst.url) URL.revokeObjectURL(vistaTypst.url);
       deComentarios.destroy();
       proveedor.destroy();
