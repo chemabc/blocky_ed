@@ -58,7 +58,7 @@ const FORMATOS = {
 
 // Estilos propios del editor, con variables para que cada aplicación los adapte a su aspecto.
 const ESTILOS = `
-.ec{--ec-borde:rgba(127,127,127,.35);--ec-acento:#7c3aed;--ec-resalte:rgba(250,204,21,.35);--ec-fondo:Canvas;display:flex;flex-direction:column;gap:.4rem}
+.ec{--ec-borde:rgba(127,127,127,.35);--ec-acento:#7c3aed;--ec-resalte:rgba(250,204,21,.35);--ec-fondo:Canvas;--ec-seleccion:rgba(124,58,237,.35);display:flex;flex-direction:column;gap:.4rem}
 .ec-barra{display:flex;flex-wrap:wrap;align-items:center;gap:.25rem;border:1px solid var(--ec-borde);border-radius:.4rem;padding:.25rem}
 .ec-barra button{min-width:2rem;border:1px solid transparent;border-radius:.3rem;background:none;color:inherit;padding:.15rem .45rem;font:inherit;cursor:pointer}
 .ec-barra button:hover:not(:disabled){border-color:var(--ec-borde)}
@@ -72,6 +72,10 @@ const ESTILOS = `
 @media (max-width:900px){.ec-cuerpo.con-panel{grid-template-columns:minmax(0,1fr)}}
 .ec-texto{position:relative;border:1px solid var(--ec-borde);border-radius:.4rem;min-height:24rem}
 .ec-texto .cm-editor{min-height:24rem;font-family:ui-monospace,monospace}
+/* Cursor y selección con el color del texto: los de CodeMirror son negros y no se ven en modo oscuro. */
+.ec-texto .cm-editor .cm-content{caret-color:currentColor}
+.ec-texto .cm-editor .cm-cursor,.ec-texto .cm-editor .cm-dropCursor{border-left:2px solid currentColor}
+.ec-texto .cm-editor .cm-selectionBackground,.ec-texto .cm-editor.cm-focused>.cm-scroller>.cm-selectionLayer .cm-selectionBackground,.ec-texto .cm-editor .cm-content ::selection{background:var(--ec-seleccion)}
 .ec-texto .cm-editor.cm-focused{outline:none}
 .ec-panel{border:1px solid var(--ec-borde);border-radius:.4rem;padding:.4rem;overflow:auto;max-height:80vh}
 .ec-panel img{width:100%;background:#fff;display:block}
